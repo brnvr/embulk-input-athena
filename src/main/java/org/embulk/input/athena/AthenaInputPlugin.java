@@ -1,6 +1,6 @@
 package org.embulk.input.athena;
 
-import com.google.common.base.Optional;
+import java.util.Optional;
 
 import java.io.File;
 import java.io.FileFilter;
@@ -14,6 +14,10 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.DatabaseMetaData;
+import java.sql.ResultSetMetaData;
+import java.sql.Types;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
 
@@ -37,6 +41,12 @@ import org.embulk.spi.PageBuilder;
 import org.embulk.spi.PageOutput;
 import org.embulk.spi.Schema;
 import org.embulk.spi.SchemaConfig;
+import org.embulk.spi.type.BooleanType;
+import org.embulk.spi.type.DoubleType;
+import org.embulk.spi.type.LongType;
+import org.embulk.spi.type.StringType;
+import org.embulk.spi.type.TimestampType;
+import org.embulk.spi.type.Type;
 import org.embulk.spi.time.Timestamp;
 import org.slf4j.Logger;
 
@@ -76,7 +86,8 @@ public class AthenaInputPlugin implements InputPlugin
 
         // if you get schema from config
         @Config("columns")
-        public SchemaConfig getColumns();
+        @ConfigDefault("null")
+        public Optional<SchemaConfig> getColumns();
 
         @Config("options")
         @ConfigDefault("{}")
@@ -95,7 +106,13 @@ public class AthenaInputPlugin implements InputPlugin
     {
         PluginTask task = config.loadConfig(PluginTask.class);
 
-        Schema schema = task.getColumns().toSchema();
+        Schema schema;
+        if (task.getColumns().isPresent()) {
+            schema = task.getColumns().get().toSchema();
+        } else {
+            schema = guessSchema(task);
+        }
+
         int taskCount = 1; // number of run() method calls
 
         return resume(task.dump(), schema, taskCount, control);
@@ -120,8 +137,6 @@ public class AthenaInputPlugin implements InputPlugin
         BufferAllocator allocator = task.getBufferAllocator();
         PageBuilder pageBuilder = new PageBuilder(allocator, schema, output);
 
-        // Write your code here :)
-
         Connection connection = null;
         Statement statement = null;
         try {
@@ -138,7 +153,11 @@ public class AthenaInputPlugin implements InputPlugin
                     {
                         try {
                             java.sql.Timestamp t = resultSet.getTimestamp(column.getName());
-                            pageBuilder.setTimestamp(column, Timestamp.ofEpochMilli(t.getTime()));
+                            if (t == null) {
+                                pageBuilder.setNull(column);
+                            } else {
+                                pageBuilder.setTimestamp(column, Timestamp.ofEpochMilli(t.getTime()));
+                            }
                         }
                         catch (SQLException e) {
                             e.printStackTrace();
@@ -150,7 +169,12 @@ public class AthenaInputPlugin implements InputPlugin
                     public void stringColumn(Column column)
                     {
                         try {
-                            pageBuilder.setString(column, resultSet.getString(column.getName()));
+                            String value = resultSet.getString(column.getName());
+                            if (value == null) {
+                                pageBuilder.setNull(column);
+                            } else {
+                                pageBuilder.setString(column, value);
+                            }
                         }
                         catch (SQLException e) {
                             e.printStackTrace();
@@ -257,6 +281,72 @@ public class AthenaInputPlugin implements InputPlugin
         return Exec.newConfigDiff();
     }
 
+    protected Schema guessSchema(PluginTask task) {
+        Connection connection = null;
+        Statement statement = null;
+        try {
+            connection = getAthenaConnection(task);
+            statement = connection.createStatement();
+            
+            // First, try to get schema information using ResultSetMetaData
+            try (ResultSet resultSet = statement.executeQuery(task.getQuery())) {
+                ResultSetMetaData metaData = resultSet.getMetaData();
+                int columnCount = metaData.getColumnCount();
+                
+                List<Column> columns = new ArrayList<>(columnCount);
+                for (int i = 1; i <= columnCount; i++) {
+                    String columnName = metaData.getColumnName(i);
+                    int columnType = metaData.getColumnType(i);
+                    
+                    Type embulkType = toEmbulkType(columnType);
+                    columns.add(new Column(i - 1, columnName, embulkType));
+                }
+                
+                return new Schema(columns);
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to guess schema from query: " + task.getQuery(), e);
+        } finally {
+            try {
+                if (statement != null) {
+                    statement.close();
+                }
+            } catch (Exception ex) { }
+            try {
+                if (connection != null) {
+                    connection.close();
+                }
+            } catch (Exception ex) {
+                ex.printStackTrace();
+            }
+        }
+    }
+
+    protected Type toEmbulkType(int sqlType) {
+        switch (sqlType) {
+            case Types.BIGINT:
+            case Types.INTEGER:
+            case Types.SMALLINT:
+            case Types.TINYINT:
+                return org.embulk.spi.type.Types.LONG;
+            case Types.DECIMAL:
+            case Types.DOUBLE:
+            case Types.FLOAT:
+            case Types.NUMERIC:
+            case Types.REAL:
+                return org.embulk.spi.type.Types.DOUBLE;
+            case Types.BOOLEAN:
+            case Types.BIT:
+                return org.embulk.spi.type.Types.BOOLEAN;
+            case Types.DATE:
+            case Types.TIME:
+            case Types.TIMESTAMP:
+                return org.embulk.spi.type.Types.TIMESTAMP;
+            default:
+                return org.embulk.spi.type.Types.STRING;
+        }
+    }
+
     protected Connection getAthenaConnection(PluginTask task) throws ClassNotFoundException, SQLException
     {
         loadDriver("com.simba.athena.jdbc.Driver", task.getDriverPath());
@@ -269,10 +359,6 @@ public class AthenaInputPlugin implements InputPlugin
 
         return DriverManager.getConnection(task.getAthenaUrl(), properties);
     }
-
-    //
-    // copy from embulk-input-jdbc
-    //
 
     protected void loadDriver(String className, Optional<String> driverPath)
     {

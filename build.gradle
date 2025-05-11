@@ -1,5 +1,5 @@
 plugins {
-    id "com.jfrog.bintray" version "1.1"
+    id "maven-publish"
     id "com.github.jruby-gradle.base" version "1.5.0"
     id "java"
     id "checkstyle"
@@ -14,18 +14,23 @@ configurations {
     provided
 }
 
-version = "0.1.7"
+version = "0.1.8"
 
 sourceCompatibility = 1.8
 targetCompatibility = 1.8
 
 dependencies {
-    compile  "org.embulk:embulk-core:0.8.39"
-    provided "org.embulk:embulk-core:0.8.39"
-    // TODO: maven...
-    compile files ('build/AthenaJDBC41.jar')
+    // Replace these lines:
+    // compile  "org.embulk:embulk-core:0.9.25"
+    // provided "org.embulk:embulk-core:0.9.25"
+    
+    // With this (adjust the path to where your jar is located):
+    compile files('/home/bruno/indicium/_other/temp/embulk-input-athena/embulk-core-0.9.25.jar')
+    provided files('/home/bruno/indicium/_other/temp/embulk-input-athena/embulk-core-0.9.25.jar')
+    compile 'org.slf4j:slf4j-api:1.7.25'   
+    // Rest of your dependencies remain the same
+    compile files('build/AthenaJDBC41.jar')
     compile group: 'com.amazonaws', name: 'aws-java-sdk', version: '1.11.301'
-    // compile group: 'com.amazonaws', name: 'aws-java-sdk-athena', version: '1.11.301'
     compile 'org.embulk:embulk-input-jdbc:0.12.2'
     testCompile "junit:junit:4.+"
 }
@@ -89,7 +94,7 @@ task gemspec {
 Gem::Specification.new do |spec|
   spec.name          = "${project.name}"
   spec.version       = "${project.version}"
-  spec.authors       = ["shinji19"]
+  spec.authors       = ["shinji19", "brnvr"]
   spec.summary       = %[Athena input plugin for Embulk]
   spec.description   = %[Loads records from Athena.]
   spec.email         = [""]
@@ -108,3 +113,12 @@ end
     }
 }
 clean { delete "${project.name}.gemspec" }
+
+// Add maven-publish configuration
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+        }
+    }
+}
